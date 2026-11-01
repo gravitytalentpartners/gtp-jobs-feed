@@ -15,9 +15,11 @@ FIELDS = ['fldFXHEJG0vswcP8X', 'fld8KT77VQn86rNfP', 'fldSsFLw3ySgFAJjT', 'fld5UP
 
 
 def main():
-    token = os.environ.get('AIRTABLE_TOKEN')
+    token = (os.environ.get('AIRTABLE_TOKEN') or '').strip()
     if not token:
         raise SystemExit('AIRTABLE_TOKEN is not set')
+    if '.' not in token or not token.startswith('pat'):
+        raise SystemExit('AIRTABLE_TOKEN does not look like a full Airtable token (it should start with pat and contain a dot). The token ID shown in the Airtable list is not the token.')
     out = sys.argv[1]
     records, offset = [], None
     while True:
