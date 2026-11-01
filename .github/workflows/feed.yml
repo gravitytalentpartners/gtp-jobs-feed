@@ -21,6 +21,7 @@ jobs:
 
       - name: Build the feed
         run: |
+          mkdir -p out
           python3 build_board.py open_searches.json overrides.json out feed https://raw.githubusercontent.com/gravitytalentpartners/gtp-jobs-feed/main/jobs.json
           cp out/jobs.json jobs.json
           python3 -c "import json; d=json.load(open('jobs.json')); print(d['count'], 'jobs')"
