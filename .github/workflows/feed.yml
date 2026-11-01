@@ -1,0 +1,48 @@
+name: Rebuild jobs feed
+
+on:
+  schedule:
+    - cron: "33 20 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull open searches from the ATS
+        env:
+          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+        run: python3 fetch_airtable.py open_searches.json
+
+      - name: Build the feed
+        run: |
+          python3 build_board.py open_searches.json overrides.json out feed https://raw.githubusercontent.com/gravitytalentpartners/gtp-jobs-feed/main/jobs.json
+          cp out/jobs.json jobs.json
+          python3 -c "import json; d=json.load(open('jobs.json')); print(d['count'], 'jobs')"
+
+      - name: Commit when the jobs changed
+        run: |
+          git config user.name "GTP feed bot"
+          git config user.email "mike@gravityexecutives.com"
+          if python3 - <<'EOF'
+          import json, subprocess
+          old = subprocess.run(['git', 'show', 'HEAD:jobs.json'], capture_output=True, text=True).stdout
+          try:
+              old_jobs = json.loads(old)['jobs']
+          except Exception:
+              old_jobs = None
+          new_jobs = json.load(open('jobs.json'))['jobs']
+          raise SystemExit(0 if old_jobs != new_jobs else 1)
+          EOF
+          then
+            git add jobs.json
+            git commit -m "Jobs feed $(date -u +%Y-%m-%d) ($(python3 -c "import json; print(json.load(open('jobs.json'))['count'])") jobs)"
+            git push
+          else
+            echo "No job changes, feed left as is"
+          fi
