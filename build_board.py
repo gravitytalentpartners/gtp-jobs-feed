@@ -3,18 +3,24 @@
 
 Input: a JSON export of the Open Searches table filtered to Post to Website = true
 (the exact shape the Airtable list_records_for_table tool returns), plus overrides.json.
+pages.json (job page link per job) and manual_jobs.json (jobs with no ATS record) are read
+from the same folder as overrides.json when they exist.
+Records whose Stage is Completed Placement or On Hold never reach the board, even if
+Post to Website is still checked.
 Output: jobs.json (the feed), board_embed_vN.html (static paste version), board_loader.html
 (one time paste that reads the feed).
 
 Usage: build_board.py open_searches.json overrides.json out_dir version_label feed_url
 """
-import json, re, sys, html, datetime
+import json, os, re, sys, html, datetime
 
 F = {
     'title': 'fldFXHEJG0vswcP8X', 'pos': 'fld8KT77VQn86rNfP', 'client': 'fldSsFLw3ySgFAJjT',
     'metro': 'fld5UPa0CIqdxSghJ', 'tags': 'fld8MDuji3ZwMSvwV', 'desc': 'fldvo9KXYArkefizu',
     'comp': 'fldvjN43yMHvMRvpa', 'sal': 'fldHKVEnJt6R2cr6T', 'internal': 'flduOBAWQWhwN06Bf',
+    'stage': 'fldyqswm0O4UZG8NM',
 }
+CLOSED = {'completed placement', 'on hold'}
 FORM = 'https://airtable.com/appLD7LkoIgyCC4Bp/pagK5TijMmeWmwEYu/form'
 LEAK = ['fox', 'the henry', 'culinary dropout', 'flower child', 'zinburger', 'blanco', 'doughbird',
         'greene house', 'olive & ivy', 'arrogant butcher', '110 grill', 'apex', 'tavern', 'broadway',
@@ -29,13 +35,42 @@ def norm_comp(c, sal):
     return re.sub(r'(\d)k\b', r'\1K', c)
 
 
-def build_jobs(records, overrides):
-    jobs = []
+def stage_name(s):
+    if isinstance(s, dict):
+        s = s.get('name')
+    return (s or '').strip()
+
+
+def check_public(rid, role, metro, desc, tags, comp, label):
+    if not (role and metro and desc):
+        raise SystemExit('missing public field on %s %s' % (rid, label))
+    blob = ' '.join([role, metro, ' '.join(tags), desc, comp]).lower()
+    hits = [b for b in LEAK if b in blob]
+    if hits:
+        raise SystemExit('client identifier %s on %s' % (hits, label))
+
+
+def load_optional(folder, name, default):
+    path = os.path.join(folder, name)
+    if not os.path.exists(path):
+        return default
+    data = json.load(open(path))
+    if isinstance(data, dict):
+        data.pop('_note', None)
+    return data
+
+
+def build_jobs(records, overrides, pages=None, manual=None):
+    pages = pages or {}
+    jobs, seen, skipped = [], set(), []
     for r in records:
         v = r['cellValuesByFieldId']
         if v.get(F['internal']):
             continue
         rid = r['id'][-8:]
+        if stage_name(v.get(F['stage'])).lower() in CLOSED:
+            skipped.append((rid, stage_name(v.get(F['stage']))))
+            continue
         o = overrides.get(rid, {})
         role = o.get('role') or (v.get(F['pos']) or '').strip()
         metro = (v.get(F['metro']) or '').strip()
@@ -43,16 +78,36 @@ def build_jobs(records, overrides):
         desc = (v.get(F['desc']) or '').strip() + o.get('desc_suffix', '')
         sal = v.get(F['sal']) or 0
         comp = norm_comp(v.get(F['comp']), sal)
-        if not (role and metro and desc):
-            raise SystemExit('missing public field on %s %s' % (r['id'], v.get(F['title'])))
-        blob = ' '.join([role, metro, ' '.join(tags), desc, comp]).lower()
-        hits = [b for b in LEAK if b in blob]
-        if hits:
-            raise SystemExit('client identifier %s on %s' % (hits, v.get(F['title'])))
+        check_public(rid, role, metro, desc, tags, comp, v.get(F['title']))
         j = {'rid': rid, 'role': role, 'metro': metro, 'tags': tags, 'desc': desc, 'comp': comp, 'sal': sal}
         if o.get('badge'):
             j['badge'] = o['badge']
         jobs.append(j)
+        seen.add(rid)
+    for m in (manual or []):
+        rid = m['rid']
+        if rid in seen:
+            continue
+        o = overrides.get(rid, {})
+        role = o.get('role') or m.get('role', '').strip()
+        tags = [t.strip() for t in m.get('tags', []) if t.strip()]
+        desc = m.get('desc', '').strip() + o.get('desc_suffix', '')
+        comp = norm_comp(m.get('comp'), m.get('sal') or 0)
+        check_public(rid, role, m.get('metro', '').strip(), desc, tags, comp, 'manual job ' + rid)
+        j = {'rid': rid, 'role': role, 'metro': m['metro'].strip(), 'tags': tags, 'desc': desc, 'comp': comp,
+             'sal': m.get('sal') or 0}
+        if o.get('badge') or m.get('badge'):
+            j['badge'] = o.get('badge') or m.get('badge')
+        jobs.append(j)
+        seen.add(rid)
+    for j in jobs:
+        url = pages.get(j['rid'])
+        if url:
+            if not re.match(r'^/jobs/[a-z0-9-]+$', url):
+                raise SystemExit('bad job page link for %s: %s' % (j['rid'], url))
+            j['url'] = url
+    for rid, st in skipped:
+        print('left off the board (stage %s): %s' % (st, rid))
     jobs.sort(key=lambda j: (-j['sal'], j['role'], j['metro']))
     for j in jobs:
         del j['sal']
@@ -78,6 +133,9 @@ CSS = r'''<link rel="preconnect" href="https://fonts.googleapis.com">
   .gtp-job.gtp-feat{border:2px solid #b08d2f;background:#fdfaf1}
   .gtp-badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8a6d1d;background:#f4e9c9;border:1px solid #d9c37a;border-radius:99px;padding:3px 10px;margin:0 0 8px}
   .gtp-job-title{display:block;font-family:"Source Serif 4",Georgia,serif;font-weight:600;font-size:18px;line-height:1.3;color:var(--ink)}
+  a.gtp-job-link{color:inherit;text-decoration:none;background-image:none}
+  a.gtp-job-link:hover .gtp-job-title{text-decoration:underline}
+  .gtp-page{font-size:13px;color:var(--stone);text-decoration:underline}
   .gtp-job-meta{display:block;font-size:13.5px;color:var(--stone);margin-top:4px}
   .gtp-tags{margin:10px 0 0;display:flex;flex-wrap:wrap;gap:6px}
   .gtp-tag{font-size:11.5px;color:var(--stone);background:var(--wash);border:1px solid var(--line);border-radius:99px;padding:3px 10px;white-space:nowrap}
@@ -144,12 +202,13 @@ function render(){
     var tags=j.tags.map(function(t){return '<span class="gtp-tag">'+esc(t)+'</span>';}).join('');
     htmlOut+='<div class="gtp-job'+(j.badge?' gtp-feat':'')+'">'
       +(j.badge?'<span class="gtp-badge">'+esc(j.badge)+'</span>':'')
-      +'<span class="gtp-job-title">'+esc(j.role)+'</span>'
+      +(j.url?'<a class="gtp-job-link" href="'+esc(j.url)+'">':'')+'<span class="gtp-job-title">'+esc(j.role)+'</span>'+(j.url?'</a>':'')
       +'<span class="gtp-job-meta">'+esc(j.metro)+'</span>'
       +'<div class="gtp-tags">'+tags+'</div>'
       +'<div class="gtp-desc">'+esc(j.desc)+'</div>'
       +'<div class="gtp-actions"><span class="gtp-comp">'+esc(j.comp)+'</span>'
       +'<button class="gtp-more" type="button">Details</button>'
+      +(j.url?'<a class="gtp-page" href="'+esc(j.url)+'">Full job page</a>':'')
       +'<a class="gtp-apply" href="'+FORM+'?prefill_Position='+pos+'" target="_blank" rel="noopener">Apply</a></div>'
       +'</div>';
   });
@@ -170,7 +229,10 @@ def main():
     src, ovr, out, label, feed_url = sys.argv[1:6]
     records = json.load(open(src))['records']
     overrides = json.load(open(ovr))
-    jobs = build_jobs(records, overrides)
+    folder = os.path.dirname(os.path.abspath(ovr))
+    pages = load_optional(folder, 'pages.json', {})
+    manual = load_optional(folder, 'manual_jobs.json', {}).get('jobs', [])
+    jobs = build_jobs(records, overrides, pages, manual)
     generated = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     feed = {'generated': generated, 'count': len(jobs), 'jobs': jobs}
     json.dump(feed, open(out + '/jobs.json', 'w'), ensure_ascii=False, separators=(',', ':'))
@@ -183,7 +245,8 @@ def main():
     ) % feed_url
     open(out + '/board_loader.html', 'w').write(page(loader))
     metros = sorted(set(re.sub(r'\s*\(.*\)$', '', j['metro']) for j in jobs))
-    print('jobs:', len(jobs), 'featured:', sum(1 for j in jobs if j.get('badge')), 'metros:', len(metros))
+    print('jobs:', len(jobs), 'featured:', sum(1 for j in jobs if j.get('badge')), 'metros:', len(metros),
+          'with job page:', sum(1 for j in jobs if j.get('url')))
     print('top:', [(j['role'], j['comp']) for j in jobs[:3]])
 
 
