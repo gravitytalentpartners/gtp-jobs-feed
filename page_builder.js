@@ -238,8 +238,13 @@
     });
     if (built.length || down.length || synced.length) {
       st.headerInjectCode = writeMap(st.headerInjectCode, rm, map);
-      var r4 = await fetch('/api/commondata/SaveCollectionSettings', {method: 'POST', credentials: 'include', headers: hdr('application/json; charset=UTF-8'), body: JSON.stringify({collectionData: st})});
+      st.collectionId = COLL; st.password = '';
+      var r4 = await fetch('/api/commondata/SaveCollectionSettings', {method: 'POST', credentials: 'include', headers: hdr('application/json; charset=UTF-8'), body: JSON.stringify({collectionData: st, memberAreaData: {}})});
       if (!r4.ok) errors.push({error: 'map save failed: status ' + r4.status});
+      var check = readMap((await settings()).headerInjectCode).map, missed = [];
+      built.forEach(function (b) { if (!check[b.path]) missed.push(b.path); });
+      down.forEach(function (d) { if (check[d.path]) missed.push(d.path); });
+      if (missed.length) errors.push({error: 'job page map did not save for ' + missed.join(', ')});
     }
 
     // 5. redirects for pages that came down
