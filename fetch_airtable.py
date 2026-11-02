@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Pull Open Searches records with Post to Website checked from the GTP ATS and save them
+"""Pull Open Searches records with Post to Website checked (and Stage not Completed Placement
+or On Hold) from the GTP ATS and save them
 in the shape build_board.py expects ({"records": [{"id": ..., "cellValuesByFieldId": {...}}]}).
 
 Reads AIRTABLE_TOKEN from the environment (a read only personal access token scoped to the base).
@@ -11,7 +12,8 @@ BASE = 'appLD7LkoIgyCC4Bp'
 TABLE = 'tbldnlIklvv8YS7h5'
 FIELDS = ['fldFXHEJG0vswcP8X', 'fld8KT77VQn86rNfP', 'fldSsFLw3ySgFAJjT', 'fld5UPa0CIqdxSghJ',
           'fld8MDuji3ZwMSvwV', 'fldvo9KXYArkefizu', 'fldvjN43yMHvMRvpa', 'fldHKVEnJt6R2cr6T',
-          'flduOBAWQWhwN06Bf']
+          'flduOBAWQWhwN06Bf', 'fldyqswm0O4UZG8NM']
+FORMULA = "AND({Post to Website}, NOT(OR({Stage} = 'Completed Placement', {Stage} = 'On Hold')))"
 
 
 def main():
@@ -24,7 +26,7 @@ def main():
     records, offset = [], None
     while True:
         params = [('returnFieldsByFieldId', 'true'), ('pageSize', '100'),
-                  ('filterByFormula', '{Post to Website}')]
+                  ('filterByFormula', FORMULA)]
         params += [('fields[]', f) for f in FIELDS]
         if offset:
             params.append(('offset', offset))
