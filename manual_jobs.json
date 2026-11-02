@@ -1,0 +1,19 @@
+{
+  "_note": "Jobs that belong on the board but have no Open Searches record. Same fields as the feed plus sal (top of the pay range, used for sort order) and date added. Remove an entry when that search closes.",
+  "jobs": [
+    {
+      "rid": "get5PV4G",
+      "role": "Restaurant Manager",
+      "metro": "Phoenix Metro, AZ",
+      "tags": [
+        "Full service",
+        "Scratch kitchen",
+        "Strong bar program"
+      ],
+      "desc": "Vibrant, full service scratch kitchen property in the $4M to $7M range with a strong bar program and festive energy. The people we seek for this role describe themselves as outgoing, people oriented, and persuasive: motivating team builders who connect quickly, stay poised under pressure, take initiative, and are driven to get things done in a fast paced, ever changing environment.",
+      "comp": "Up to $75K",
+      "sal": 75000,
+      "added": "2026-10-16"
+    }
+  ]
+}
