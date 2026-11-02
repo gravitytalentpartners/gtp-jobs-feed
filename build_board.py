@@ -3,8 +3,10 @@
 
 Input: a JSON export of the Open Searches table filtered to Post to Website = true
 (the exact shape the Airtable list_records_for_table tool returns), plus overrides.json.
-pages.json (job page link per job) and manual_jobs.json (jobs with no ATS record) are read
-from the same folder as overrides.json when they exist.
+pages.json (job page link per job, a fallback) and manual_jobs.json (jobs with no ATS record) are
+read from the same folder as overrides.json when they exist. The live board takes its job page links
+from the job page map on gravityexecutives.com/jobs (kept current by page_builder.js) and only uses the
+pages.json links if that map cannot be read.
 Records whose Stage is Completed Placement or On Hold never reach the board, even if
 Post to Website is still checked.
 Output: jobs.json (the feed), board_embed_vN.html (static paste version), board_loader.html
@@ -186,7 +188,7 @@ BODY = r'''<div class="gtp-board"><div class="gtp-wrap">
 RENDER = r'''
 var FORM="%(form)s";
 var list=document.getElementById('gtpList'),q=document.getElementById('gtpSearch'),sel=document.getElementById('gtpMetro'),shown=document.getElementById('gtpShown'),empty=document.getElementById('gtpEmpty');
-var JOBS=[];
+var JOBS=[],LINKS=null;
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function baseMetro(m){return m.replace(/\s*\(.*\)$/,'');}
 function fillMetros(){var seen={},opts=[];JOBS.forEach(function(j){var b=baseMetro(j.metro);if(!seen[b]){seen[b]=1;opts.push(b);}});opts.sort();var cur=sel.value;sel.innerHTML='<option value="">All locations</option>'+opts.map(function(m){return '<option value="'+esc(m)+'">'+esc(m)+'</option>';}).join('');sel.value=cur;}
@@ -198,17 +200,18 @@ function render(){
     if(metro&&baseMetro(j.metro)!==metro)return;
     if(term&&hay.indexOf(term)===-1)return;
     n++;
+    var url=LINKS?LINKS[j.rid]:j.url;
     var pos=encodeURIComponent(j.role+' - '+j.metro+' ['+j.rid+']');
     var tags=j.tags.map(function(t){return '<span class="gtp-tag">'+esc(t)+'</span>';}).join('');
     htmlOut+='<div class="gtp-job'+(j.badge?' gtp-feat':'')+'">'
       +(j.badge?'<span class="gtp-badge">'+esc(j.badge)+'</span>':'')
-      +(j.url?'<a class="gtp-job-link" href="'+esc(j.url)+'">':'')+'<span class="gtp-job-title">'+esc(j.role)+'</span>'+(j.url?'</a>':'')
+      +(url?'<a class="gtp-job-link" href="'+esc(url)+'">':'')+'<span class="gtp-job-title">'+esc(j.role)+'</span>'+(url?'</a>':'')
       +'<span class="gtp-job-meta">'+esc(j.metro)+'</span>'
       +'<div class="gtp-tags">'+tags+'</div>'
       +'<div class="gtp-desc">'+esc(j.desc)+'</div>'
       +'<div class="gtp-actions"><span class="gtp-comp">'+esc(j.comp)+'</span>'
       +'<button class="gtp-more" type="button">Details</button>'
-      +(j.url?'<a class="gtp-page" href="'+esc(j.url)+'">Full job page</a>':'')
+      +(url?'<a class="gtp-page" href="'+esc(url)+'">Full job page</a>':'')
       +'<a class="gtp-apply" href="'+FORM+'?prefill_Position='+pos+'" target="_blank" rel="noopener">Apply</a></div>'
       +'</div>';
   });
@@ -216,6 +219,7 @@ function render(){
   wire(list);
 }
 function load(jobs){JOBS=jobs;fillMetros();render();}
+function links(){return fetch('/jobs',{cache:'no-store'}).then(function(r){return r.text();}).then(function(h){var i=h.indexOf('var jobs = {');if(i<0)return null;var s=h.slice(i+11),e=s.indexOf('\n  };');var m=JSON.parse(s.slice(0,e+4)),o={};Object.keys(m).forEach(function(p){o[m[p].ref]=p;});return o;}).catch(function(){return null;});}
 q.addEventListener('input',render);sel.addEventListener('change',render);
 wire(document.querySelector('.gtp-team'));
 '''
@@ -241,7 +245,7 @@ def main():
     loader = RENDER % {'form': FORM} + (
         "var FEED='%s';\n"
         "fetch(FEED+'?t='+Math.floor(Date.now()/600000),{cache:'no-store'}).then(function(r){return r.json();})"
-        ".then(function(f){load(f.jobs);}).catch(function(){shown.textContent='0';empty.textContent='Open positions are loading slowly. Please refresh in a moment.';empty.style.display='block';});"
+        ".then(function(f){load(f.jobs);links().then(function(m){if(m){LINKS=m;render();}});}).catch(function(){shown.textContent='0';empty.textContent='Open positions are loading slowly. Please refresh in a moment.';empty.style.display='block';});"
     ) % feed_url
     open(out + '/board_loader.html', 'w').write(page(loader))
     metros = sorted(set(re.sub(r'\s*\(.*\)$', '', j['metro']) for j in jobs))
