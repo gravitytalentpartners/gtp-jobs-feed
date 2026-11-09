@@ -1,0 +1,51 @@
+# Save as .github/workflows/index-jobs.yml in gravitytalentpartners/gtp-jobs-feed
+#
+# Signs in to Google keylessly through Workload Identity Federation
+# (project My Project 91598, pool github, provider github), then pushes
+# job page URLs to the Google Indexing API. No secrets are needed.
+name: Push job pages to Google Indexing API
+
+on:
+  schedule:
+    # Sunday 8:17 PM Eastern, after the 6:13 PM page builder (cron is UTC)
+    - cron: '17 1 * * 1'
+    # Every weekday at 11:07 AM Eastern as a catch up
+    - cron: '7 16 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 'Resend every live page (1 = yes)'
+        default: '0'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Sign in to Google
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/237578960455/locations/global/workloadIdentityPools/github/providers/github
+          service_account: gtp-jobs-indexing@skilful-frame-513714-b2.iam.gserviceaccount.com
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/indexing
+      - name: Push URLs to Google
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          FULL: ${{ github.event.inputs.full || '0' }}
+        run: node indexing_push.js
+      - name: Save state
+        run: |
+          git config user.name "gtp-bot"
+          git config user.email "bot@gravityexecutives.com"
+          git add indexing_state.json
+          git diff --cached --quiet || git commit -m "Update indexing state"
+          git push
