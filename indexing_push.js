@@ -54,7 +54,8 @@ async function liveUrls() {
   if (i < 0) throw new Error('job page map not found on /jobs');
   const s = h.slice(i + 11), e = s.indexOf('\n  };');
   const map = JSON.parse(s.slice(0, e + 4));
-  return Object.keys(map).map(p => SITE + p).sort();
+  // folded openings (entries with "to") share the kept page and have no page of their own
+  return Object.keys(map).filter(p => !map[p].to).map(p => SITE + p).sort();
 }
 
 async function publish(token, url, type) {

@@ -9,6 +9,11 @@
  *   await GTPB.run({copy})        builds missing pages, takes down stale ones, syncs pay and metro
  *   await GTPB.verify()           checks every board job has a live page and every stale page redirects
  *
+ * Repeat openings (same role, metro and concept tags) share one page. The extra openings are folded
+ * entries in the job page map (key "KEPT_PATH#REF", with "to" naming the kept page). The builder folds
+ * new repeats into the existing page, moves the page to another open opening when its own one closes,
+ * keeps the line that says how many openings there are, and never rebuilds a folded page.
+ *
  * Jobs whose role and concept match a template are written automatically. Any other job comes back in
  * plan().needsCopy and must be given copy in run({copy: {RID: {...}}}) or it is skipped and reported.
  * Copy fields: label (title segment, for example "Global Hotel Company"), noun (for the SEO line, for
@@ -99,7 +104,41 @@
     if (hits.length) throw new Error(job.rid + ' client name in copy: ' + hits.join(', '));
     if (!dashFree(blob)) throw new Error(job.rid + ' dash punctuation in copy');
     return {rid: job.rid, title: title, slug: slug, html: html, entry: entry, excerpt: excerpt,
-      seoTitle: job.role + ' Job, ' + p[0] + ' | Gravity Talent Partners', seoDesc: seoDesc};
+      seoTitle: job.role + ' Job, ' + p[0] + ', ' + c.label + ' | Gravity Talent Partners', seoDesc: seoDesc};
+  }
+
+  // Repeat openings. Jobs with the same role, metro and concept tags share one page (the kept page).
+  // Every other opening in the set is a folded entry in the job page map: key "KEPT_PATH#REF", with
+  // "to" naming the kept page. Folded entries have no page of their own; the board links them to the
+  // kept page and the page header counts them when it checks whether the page is still open.
+  var WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'];
+  var LINE_RE = /<p[^>]*>There (?:are|is) [^<]*? openings? for this role across[^<]*<\/p>/;
+  function gkey(e) { return [e.role, e.metro, (e.tags || []).join('|')].join('~'); }
+  function kfmt(n) { var t = n / 1000; return '$' + (t % 1 ? t.toFixed(1) : t) + 'K'; }
+  function groupLine(members) {
+    if (members.length < 2) return '';
+    var tops = members.map(function (e) { return e.max; }).filter(Boolean);
+    var lo = Math.min.apply(null, tops), hi = Math.max.apply(null, tops);
+    var s = 'There are ' + (WORDS[members.length] || members.length) + ' openings for this role across the ' + place(members[0].metro)[1] +
+      '. On the application, tell us which part of the area you would most like to work in.';
+    if (tops.length === members.length && lo !== hi) s += ' Pay tops out between ' + kfmt(lo) + ' and ' + kfmt(hi) + ' depending on the location.';
+    return PS + esc(s) + '</p>';
+  }
+  function setLine(html, line) {
+    if (LINE_RE.test(html)) return html.replace(LINE_RE, function () { return line; });
+    if (!line) return html;
+    var i = html.indexOf('</p>');
+    return i < 0 ? html : html.slice(0, i + 4) + line + html.slice(i + 4);
+  }
+  function payFields(e, comp) {
+    var pr = pay(comp);
+    if (pr) { e.max = pr[1]; if (pr[0]) e.min = pr[0]; else delete e.min; delete e.nosal; } else { delete e.max; delete e.min; e.nosal = true; }
+  }
+  function foldedEntry(keptEntry, job, keptPath) {
+    var e = JSON.parse(JSON.stringify(keptEntry));
+    e.comp = job.comp; e.ref = job.rid; e.date = today(); e.to = keptPath;
+    payFields(e, job.comp);
+    return e;
   }
 
   async function settings() { return getJSON('/api/commondata/GetCollectionSettings?collectionId=' + COLL); }
@@ -124,27 +163,73 @@
     var seen = {}; return all.filter(function (x) { if (seen[x.id]) return false; seen[x.id] = 1; return true; });
   }
 
-  async function plan() {
-    var feed = await fetch(FEED + '?x=' + Date.now(), {cache: 'no-store'}).then(function (r) { return r.json(); });
-    var st = await settings(), rm = readMap(st.headerInjectCode), map = rm.map;
-    var its = await items(), byPath = {};
-    its.forEach(function (x) { byPath[x.fullUrl] = x; });
-    var refs = {}; Object.keys(map).forEach(function (p) { refs[map[p].ref] = p; });
+  // Works out everything from the feed, the job page map and the post list. Changes nothing.
+  function analyze(feed, map, its) {
+    var byPath = {}; its.forEach(function (x) { byPath[x.fullUrl] = x; });
     var live = {}; feed.jobs.forEach(function (j) { live[j.rid] = j; });
-    var missing = feed.jobs.filter(function (j) { return !refs[j.rid]; });
-    var stale = Object.keys(map).filter(function (p) { return !live[map[p].ref]; })
-      .map(function (p) { var it = byPath[p]; return {ref: map[p].ref, path: p, role: map[p].role, metro: map[p].metro, postId: it ? it.id : null, published: it ? it.workflowState === 1 : false}; });
+    var keys = Object.keys(map);
+    var keptKeys = keys.filter(function (p) { return !map[p].to; });
+    var foldKeys = keys.filter(function (p) { return !!map[p].to; });
+    var foldedOf = {};
+    foldKeys.forEach(function (p) { var t = map[p].to; if (map[t] && !map[t].to) (foldedOf[t] = foldedOf[t] || []).push(p); });
+    // folded entries whose kept page is no longer in the map: drop them and treat their jobs as new
+    var orphan = foldKeys.filter(function (p) { return !(map[map[p].to] && !map[map[p].to].to); });
+    var orphanSet = {}; orphan.forEach(function (p) { orphanSet[p] = 1; });
+    var refs = {}; keys.forEach(function (p) { if (!orphanSet[p]) refs[map[p].ref] = p; });
+
+    var stale = [], promote = [], dropFolded = orphan.slice();
+    keptKeys.forEach(function (p) {
+      if (live[map[p].ref]) return;
+      var lf = (foldedOf[p] || []).filter(function (f) { return live[map[f].ref]; });
+      if (lf.length) {
+        lf.sort(function (a, b) { return (map[b].max || 0) - (map[a].max || 0); });
+        promote.push({path: p, from: lf[0], oldRef: map[p].ref, ref: map[lf[0]].ref, role: map[p].role, metro: map[p].metro});
+      } else {
+        var it = byPath[p];
+        stale.push({ref: map[p].ref, path: p, role: map[p].role, metro: map[p].metro, postId: it ? it.id : null, published: it ? it.workflowState === 1 : false});
+        (foldedOf[p] || []).forEach(function (f) { dropFolded.push(f); });
+      }
+    });
+    var staleSet = {}; stale.forEach(function (s) { staleSet[s.path] = 1; });
+    foldKeys.forEach(function (f) { if (!orphanSet[f] && !staleSet[map[f].to] && !live[map[f].ref]) dropFolded.push(f); });
+
+    // folded entries still keyed by an old page address: the old page goes to draft and redirects to the kept page
+    var dropSet = {}; dropFolded.forEach(function (f) { dropSet[f] = 1; });
+    var normalize = foldKeys.filter(function (f) { return !dropSet[f] && f.indexOf('#') < 0; })
+      .map(function (f) { var it = byPath[f]; return {key: f, to: map[f].to, ref: map[f].ref, postId: it ? it.id : null, published: it ? it.workflowState === 1 : false}; });
+
+    // new jobs: fold into an existing kept page for the same role, metro and concept, or build a page
+    var keptByKey = {}; keptKeys.forEach(function (p) { if (!staleSet[p]) keptByKey[gkey(map[p])] = keptByKey[gkey(map[p])] || p; });
+    var missing = [], folds = [], firstNew = {};
+    feed.jobs.forEach(function (j) {
+      if (refs[j.rid]) return;
+      var k = gkey(j);
+      if (keptByKey[k]) folds.push({rid: j.rid, into: keptByKey[k], role: j.role, metro: j.metro});
+      else if (firstNew[k]) folds.push({rid: j.rid, intoRid: firstNew[k], role: j.role, metro: j.metro});
+      else { firstNew[k] = j.rid; missing.push(j); }
+    });
     var sync = feed.jobs.filter(function (j) { var p = refs[j.rid]; return p && (map[p].comp !== j.comp || map[p].metro !== j.metro); })
       .map(function (j) { var p = refs[j.rid]; return {rid: j.rid, path: p, comp: [map[p].comp, j.comp], metro: [map[p].metro, j.metro]}; });
-    var needsCopy = missing.filter(function (j) { return !template(j); })
+    return {live: live, byPath: byPath, refs: refs, missing: missing, folds: folds, stale: stale, promote: promote,
+      dropFolded: dropFolded, normalize: normalize, sync: sync};
+  }
+
+  async function plan() {
+    var feed = await fetch(FEED + '?x=' + Date.now(), {cache: 'no-store'}).then(function (r) { return r.json(); });
+    var st = await settings(), map = readMap(st.headerInjectCode).map;
+    var a = analyze(feed, map, await items());
+    var needsCopy = a.missing.filter(function (j) { return !template(j); })
       .map(function (j) { return {rid: j.rid, role: j.role, metro: j.metro, comp: j.comp, tags: j.tags, desc: j.desc}; });
     var ageDays = (Date.now() - Date.parse(feed.generated)) / 864e5;
+    var pageCount = Object.keys(map).filter(function (p) { return !map[p].to; }).length;
     var abort = null;
     if (!feed.jobs || feed.jobs.length < 50) abort = 'feed has only ' + (feed.jobs || []).length + ' jobs';
-    else if (stale.length > 0.3 * Object.keys(map).length) abort = stale.length + ' of ' + Object.keys(map).length + ' pages would come down at once';
+    else if (a.stale.length > 0.3 * pageCount) abort = a.stale.length + ' of ' + pageCount + ' pages would come down at once';
     return {feedGenerated: feed.generated, feedAgeDays: Math.round(ageDays * 10) / 10, boardJobs: feed.jobs.length,
-      pages: Object.keys(map).length, missing: missing.map(function (j) { return {rid: j.rid, role: j.role, metro: j.metro, auto: !!template(j)}; }),
-      needsCopy: needsCopy, stale: stale, sync: sync, abort: abort};
+      pages: pageCount, foldedOpenings: Object.keys(map).length - pageCount,
+      missing: a.missing.map(function (j) { return {rid: j.rid, role: j.role, metro: j.metro, auto: !!template(j)}; }),
+      needsCopy: needsCopy, folds: a.folds, stale: a.stale, promote: a.promote, dropFolded: a.dropFolded, normalize: a.normalize,
+      sync: a.sync, abort: abort};
   }
 
   async function preview(rid, copy) {
@@ -155,27 +240,35 @@
     return makePage(job, c, {});
   }
 
+  async function putPost(id, change) {
+    var u = POSTS + '/' + id, p = await getJSON(u);
+    if (change(p) === false) return false;
+    var r = await fetch(u, {method: 'PUT', credentials: 'include', headers: hdr(), body: JSON.stringify(p)});
+    if (!r.ok) throw new Error('status ' + r.status);
+    return true;
+  }
+
   async function run(opts) {
     opts = opts || {};
     var copy = opts.copy || {}, dry = !!opts.dryRun;
     var pl = await plan();
     if (pl.abort && !opts.force) return {aborted: pl.abort, plan: pl};
     var feed = await fetch(FEED + '?x=' + Date.now(), {cache: 'no-store'}).then(function (r) { return r.json(); });
-    var live = {}; feed.jobs.forEach(function (j) { live[j.rid] = j; });
     var its = await items(), taken = {};
     its.forEach(function (x) { taken[x.urlId] = 1; });
+    var st0 = await settings(), a = analyze(feed, readMap(st0.headerInjectCode).map, its), live = a.live;
     var tmplItem = its.filter(function (x) { return x.workflowState === 1; })[0];
-    var tmpl = await getJSON(POSTS + '/' + tmplItem.id);
-    var built = [], skipped = [], errors = [], down = [], synced = [];
+    var built = [], skipped = [], errors = [], down = [], synced = [], folded = [], promoted = [], dropped = [], normalized = [];
     var pages = [];
-    pl.missing.forEach(function (m) {
-      var job = live[m.rid], c = copy[m.rid] || template(job);
-      if (!c) { skipped.push({rid: m.rid, role: job.role, metro: job.metro, reason: 'no template and no copy given'}); return; }
-      try { var pg = makePage(job, c, taken); taken[pg.slug] = 1; pages.push(pg); } catch (e) { errors.push({rid: m.rid, error: String(e.message || e)}); }
+    a.missing.forEach(function (job) {
+      var c = copy[job.rid] || template(job);
+      if (!c) { skipped.push({rid: job.rid, role: job.role, metro: job.metro, reason: 'no template and no copy given'}); return; }
+      try { var pg = makePage(job, c, taken); taken[pg.slug] = 1; pages.push(pg); } catch (e) { errors.push({rid: job.rid, error: String(e.message || e)}); }
     });
-    if (dry) return {dryRun: true, plan: pl, wouldBuild: pages.map(function (p) { return {rid: p.rid, title: p.title, slug: p.slug}; }), skipped: skipped, errors: errors};
+    if (dry) return {dryRun: true, plan: pl, wouldBuild: pages.map(function (p) { return {rid: p.rid, title: p.title, slug: p.slug, seoTitle: p.seoTitle}; }), skipped: skipped, errors: errors};
 
     // 1. create posts
+    var tmpl = pages.length ? await getJSON(POSTS + '/' + tmplItem.id) : null;
     for (var i = 0; i < pages.length; i++) {
       var pg = pages[i], post = JSON.parse(JSON.stringify(tmpl));
       ['id', 'assetUrl', 'fullUrl', 'addedOn', 'updatedOn', 'publishOn', 'shareStates', 'pushedServices', 'pendingPushedServices', 'commentCount'].forEach(function (k) { delete post[k]; });
@@ -189,84 +282,128 @@
         var r = await fetch(POSTS, {method: 'POST', credentials: 'include', headers: hdr(), body: JSON.stringify(post)});
         var j = await r.json();
         if (!r.ok || !j.fullUrl) throw new Error('status ' + r.status);
-        pg.path = j.fullUrl; built.push({rid: pg.rid, title: pg.title, path: j.fullUrl});
+        pg.path = j.fullUrl; pg.postId = j.id; built.push({rid: pg.rid, title: pg.title, path: j.fullUrl});
       } catch (e) { errors.push({rid: pg.rid, error: 'create failed: ' + (e.message || e)}); }
     }
 
     // 2. take down stale pages (draft) and collect redirects
-    var redirectPaths = [];
-    for (var s = 0; s < pl.stale.length; s++) {
-      var x = pl.stale[s];
+    var redirects = [];
+    for (var s = 0; s < a.stale.length; s++) {
+      var x = a.stale[s];
       try {
-        if (x.postId && x.published) {
-          var u = POSTS + '/' + x.postId, p2 = await getJSON(u);
-          p2.workflowState = 4;
-          var r2 = await fetch(u, {method: 'PUT', credentials: 'include', headers: hdr(), body: JSON.stringify(p2)});
-          if (!r2.ok) throw new Error('status ' + r2.status);
-        }
-        redirectPaths.push(x.path); down.push({ref: x.ref, role: x.role, metro: x.metro, path: x.path});
+        if (x.postId && x.published) await putPost(x.postId, function (p) { p.workflowState = 4; });
+        redirects.push([x.path, '/hospitality-jobs']); down.push({ref: x.ref, role: x.role, metro: x.metro, path: x.path});
       } catch (e) { errors.push({rid: x.ref, error: 'take down failed: ' + (e.message || e)}); }
     }
 
-    // 3. sync pay and metro on existing pages
-    for (var q = 0; q < pl.sync.length; q++) {
-      var sy = pl.sync[q];
+    // 3. sync pay on existing pages
+    for (var q = 0; q < a.sync.length; q++) {
+      var sy = a.sync[q];
       try {
-        var it = its.filter(function (z) { return z.fullUrl === sy.path; })[0];
+        var it = a.byPath[sy.path];
         if (it && sy.comp[0] !== sy.comp[1]) {
-          var u3 = POSTS + '/' + it.id, p3 = await getJSON(u3), b3 = p3.body.layout.rows[0].columns[0].blocks[0];
-          var oldP = PS + esc(sy.comp[0] + ', full time.') + '</p>';
-          if (b3.value && b3.value.html && b3.value.html.indexOf(oldP) > -1) {
-            b3.value.html = b3.value.html.replace(oldP, PS + esc(sy.comp[1] + ', full time.') + '</p>');
-            var r3 = await fetch(u3, {method: 'PUT', credentials: 'include', headers: hdr(), body: JSON.stringify(p3)});
-            if (!r3.ok) throw new Error('status ' + r3.status);
-          }
+          await putPost(it.id, function (p) {
+            var b = p.body.layout.rows[0].columns[0].blocks[0], oldP = PS + esc(sy.comp[0] + ', full time.') + '</p>';
+            if (!(b.value && b.value.html && b.value.html.indexOf(oldP) > -1)) return false;
+            b.value.html = b.value.html.replace(oldP, function () { return PS + esc(sy.comp[1] + ', full time.') + '</p>'; });
+          });
         }
         synced.push(sy);
       } catch (e) { errors.push({rid: sy.rid, error: 'sync failed: ' + (e.message || e)}); }
     }
 
-    // 4. one write to the header injection map
-    var st = await settings(), rm = readMap(st.headerInjectCode), map = rm.map;
+    // 4. old pages of folded openings go to draft and redirect to the kept page
+    for (var n = 0; n < a.normalize.length; n++) {
+      var nz = a.normalize[n];
+      try {
+        if (nz.postId && nz.published) await putPost(nz.postId, function (p) { p.workflowState = 4; });
+        redirects.push([nz.key, nz.to]); normalized.push(nz);
+      } catch (e) { errors.push({rid: nz.ref, error: 'fold failed: ' + (e.message || e)}); }
+    }
+
+    // 5. one write to the header injection map
+    var st = await settings(), rm = readMap(st.headerInjectCode), map = rm.map, before = JSON.stringify(map);
+    var touched = {}, swaps = {};
     built.forEach(function (b) { var pg = pages.filter(function (p) { return p.rid === b.rid; })[0]; map[b.path] = pg.entry; });
     down.forEach(function (d) { delete map[d.path]; });
     synced.forEach(function (sy) {
       var e = map[sy.path]; if (!e) return; var j = live[sy.rid];
-      e.comp = j.comp; e.metro = j.metro; var pr = pay(j.comp);
-      if (pr) { e.max = pr[1]; if (pr[0]) e.min = pr[0]; else delete e.min; delete e.nosal; } else { delete e.max; delete e.min; e.nosal = true; }
+      e.comp = j.comp; e.metro = j.metro; payFields(e, j.comp);
       var pl2 = place(j.metro); if (pl2[2]) e.city = pl2[2]; else delete e.city; if (pl2[3]) e.st = pl2[3]; else delete e.st;
+      touched[e.to || sy.path] = 1;
     });
-    if (built.length || down.length || synced.length) {
+    a.dropFolded.forEach(function (f) { var e = map[f]; if (!e) return; touched[e.to] = 1; dropped.push({ref: e.ref, to: e.to}); delete map[f]; });
+    normalized.forEach(function (nz) {
+      var e = map[nz.key]; if (!e) return;
+      delete map[nz.key]; map[nz.to + '#' + e.ref] = e; touched[nz.to] = 1;
+    });
+    a.promote.forEach(function (pr) {
+      var e = map[pr.path], fk = map[pr.from] ? pr.from : pr.path + '#' + pr.ref, f = map[fk]; if (!e || !f) return;
+      swaps[pr.path] = [e.ref, f.ref, e.comp, f.comp];
+      e.ref = f.ref; e.comp = f.comp; e.date = f.date; payFields(e, f.comp);
+      delete map[fk]; touched[pr.path] = 1; promoted.push({path: pr.path, oldRef: pr.oldRef, ref: f.ref});
+    });
+    a.folds.forEach(function (fo) {
+      var into = fo.into;
+      if (!into) { var b = built.filter(function (z) { return z.rid === fo.intoRid; })[0]; into = b && b.path; }
+      if (!into || !map[into]) { skipped.push({rid: fo.rid, role: fo.role, metro: fo.metro, reason: 'the page it shares was not built'}); return; }
+      map[into + '#' + fo.rid] = foldedEntry(map[into], live[fo.rid], into); touched[into] = 1; folded.push({rid: fo.rid, into: into});
+    });
+    if (JSON.stringify(map) !== before) {
       st.headerInjectCode = writeMap(st.headerInjectCode, rm, map);
       st.collectionId = COLL; st.password = '';
       var r4 = await fetch('/api/commondata/SaveCollectionSettings', {method: 'POST', credentials: 'include', headers: hdr('application/json; charset=UTF-8'), body: JSON.stringify({collectionData: st, memberAreaData: {}})});
       if (!r4.ok) errors.push({error: 'map save failed: status ' + r4.status});
-      var check = readMap((await settings()).headerInjectCode).map, missed = [];
-      built.forEach(function (b) { if (!check[b.path]) missed.push(b.path); });
-      down.forEach(function (d) { if (check[d.path]) missed.push(d.path); });
-      if (missed.length) errors.push({error: 'job page map did not save for ' + missed.join(', ')});
+      var check = readMap((await settings()).headerInjectCode).map;
+      if (JSON.stringify(check) !== JSON.stringify(map)) errors.push({error: 'job page map did not save'});
     }
 
-    // 5. redirects for pages that came down
-    if (redirectPaths.length) {
+    // 6. kept pages whose set of openings changed: openings line, and after a swap the pay line and apply link
+    var postIds = {}; its.forEach(function (z) { postIds[z.fullUrl] = z.id; });
+    pages.forEach(function (pg) { if (pg.path) postIds[pg.path] = pg.postId; });
+    var kp = Object.keys(touched).filter(function (p) { return map[p] && !map[p].to && postIds[p]; });
+    for (var t = 0; t < kp.length; t++) {
+      try {
+        await putPost(postIds[kp[t]], function (p) {
+          var b = p.body.layout.rows[0].columns[0].blocks[0]; if (!(b.value && b.value.html)) return false;
+          var path = kp[t], h0 = b.value.html, h = h0, sw = swaps[path];
+          var members = [map[path]].concat(Object.keys(map).filter(function (k) { return map[k].to === path; }).map(function (k) { return map[k]; }));
+          if (sw) {
+            h = h.split(encodeURIComponent('[' + sw[0] + ']')).join(encodeURIComponent('[' + sw[1] + ']'));
+            h = h.replace(PS + esc(sw[2] + ', full time.') + '</p>', function () { return PS + esc(sw[3] + ', full time.') + '</p>'; });
+          }
+          h = setLine(h, groupLine(members));
+          if (h === h0) return false;
+          b.value.html = h;
+        });
+      } catch (e) { errors.push({error: 'page update failed for ' + kp[t] + ': ' + (e.message || e)}); }
+    }
+
+    // 7. redirects: pages that came down go to the board, old pages of folded openings go to the kept page
+    if (redirects.length) {
       var cur = (await getJSON('/api/config/GetAdvancedSettings')).mappings || '';
-      var have = {}; cur.split('\n').forEach(function (l) { have[l.split(' ->')[0].trim()] = 1; });
-      var add = redirectPaths.filter(function (p) { return !have[p]; }).map(function (p) { return p + ' -> /hospitality-jobs 301'; });
-      if (add.length) {
-        var next = cur.replace(/\s+$/, '') + '\n' + add.join('\n');
+      var goneTo = {}; down.forEach(function (d) { goneTo[d.path] = 1; });
+      var from = {}; redirects.forEach(function (rd) { from[rd[0]] = rd[1]; });
+      var lines = cur.replace(/\s+$/, '').split('\n').filter(function (l) { return !from[l.split(' ->')[0].trim()]; })
+        .map(function (l) { var m = l.match(/^(\S+) -> (\S+) 301\s*$/); return m && goneTo[m[2]] ? m[1] + ' -> /hospitality-jobs 301' : l; });
+      redirects.forEach(function (rd) { lines.push(rd[0] + ' -> ' + (goneTo[rd[1]] ? '/hospitality-jobs' : rd[1]) + ' 301'); });
+      var next = lines.join('\n');
+      if (next !== cur.replace(/\s+$/, '')) {
         var r5 = await fetch('/api/config/SaveAdvancedSettings', {method: 'POST', credentials: 'include', headers: hdr('application/x-www-form-urlencoded; charset=UTF-8'), body: 'mappings=' + encodeURIComponent(next)});
         if (!r5.ok) errors.push({error: 'redirect save failed: status ' + r5.status});
       }
     }
-    return {built: built, takenDown: down, synced: synced, skipped: skipped, errors: errors};
+    return {built: built, takenDown: down, synced: synced, folded: folded, promoted: promoted, droppedFolded: dropped,
+      refolded: normalized.map(function (z) { return z.key; }), skipped: skipped, errors: errors};
   }
 
   async function verify() {
     var feed = await fetch(FEED + '?x=' + Date.now(), {cache: 'no-store'}).then(function (r) { return r.json(); });
     var st = await settings(), map = readMap(st.headerInjectCode).map, refs = {};
-    Object.keys(map).forEach(function (p) { refs[map[p].ref] = p; });
+    Object.keys(map).forEach(function (p) { refs[map[p].ref] = map[p].to || p; });
     var noPage = feed.jobs.filter(function (j) { return !refs[j.rid]; }).map(function (j) { return j.rid; });
-    var paths = feed.jobs.filter(function (j) { return refs[j.rid]; }).map(function (j) { return refs[j.rid]; });
+    var seen = {}, paths = [];
+    feed.jobs.forEach(function (j) { var p = refs[j.rid]; if (p && !seen[p]) { seen[p] = 1; paths.push(p); } });
     var bad = [];
     for (var i = 0; i < paths.length; i += 15) {
       var res = await Promise.all(paths.slice(i, i + 15).map(function (p) {
@@ -274,8 +411,9 @@
       }));
       res.forEach(function (x) { if (x[1] !== 200) bad.push(x); });
     }
-    return {boardJobs: feed.jobs.length, withPage: paths.length, noPage: noPage, badLinks: bad};
+    return {boardJobs: feed.jobs.length, withPage: feed.jobs.length - noPage.length, pages: paths.length, noPage: noPage, badLinks: bad};
   }
 
-  window.GTPB = {plan: plan, preview: preview, run: run, verify: verify, EXPL: DATA.EXPL, ROLES: Object.keys(DATA.ROLES), CONCEPTS: Object.keys(DATA.CONCEPTS), makePage: makePage, template: template, place: place};
+  window.GTPB = {plan: plan, preview: preview, run: run, verify: verify, EXPL: DATA.EXPL, ROLES: Object.keys(DATA.ROLES), CONCEPTS: Object.keys(DATA.CONCEPTS),
+    makePage: makePage, template: template, place: place, analyze: analyze, groupLine: groupLine, setLine: setLine};
 })();
