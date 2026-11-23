@@ -119,7 +119,8 @@
     if (members.length < 2) return '';
     var tops = members.map(function (e) { return e.max; }).filter(Boolean);
     var lo = Math.min.apply(null, tops), hi = Math.max.apply(null, tops);
-    var s = 'There are ' + (WORDS[members.length] || members.length) + ' openings for this role across the ' + place(members[0].metro)[1] +
+    var pl = place(members[0].metro), where = pl[2] ? 'the ' + pl[1] : pl[0];
+    var s = 'There are ' + (WORDS[members.length] || members.length) + ' openings for this role across ' + where +
       '. On the application, tell us which part of the area you would most like to work in.';
     if (tops.length === members.length && lo !== hi) s += ' Pay tops out between ' + kfmt(lo) + ' and ' + kfmt(hi) + ' depending on the location.';
     return PS + esc(s) + '</p>';
@@ -248,6 +249,36 @@
     return true;
   }
 
+  // Brings kept pages in line with the map: the openings line, and after a swap the pay line and apply link.
+  async function refresh(map, paths, swaps, postIds) {
+    var updated = [], errors = [];
+    var kp = paths.filter(function (p) { return map[p] && !map[p].to && postIds[p]; });
+    for (var t = 0; t < kp.length; t++) {
+      try {
+        var did = await putPost(postIds[kp[t]], function (p) {
+          var b = p.body.layout.rows[0].columns[0].blocks[0]; if (!(b.value && b.value.html)) return false;
+          var path = kp[t], h0 = b.value.html, h = h0, sw = swaps[path];
+          var members = [map[path]].concat(Object.keys(map).filter(function (k) { return map[k].to === path; }).map(function (k) { return map[k]; }));
+          if (sw) {
+            h = h.split(encodeURIComponent('[' + sw[0] + ']')).join(encodeURIComponent('[' + sw[1] + ']'));
+            h = h.replace(PS + esc(sw[2] + ', full time.') + '</p>', function () { return PS + esc(sw[3] + ', full time.') + '</p>'; });
+          }
+          h = setLine(h, groupLine(members));
+          if (h === h0) return false;
+          b.value.html = h;
+        });
+        if (did) updated.push(kp[t]);
+      } catch (e) { errors.push({error: 'page update failed for ' + kp[t] + ': ' + (e.message || e)}); }
+    }
+    return {updated: updated, errors: errors};
+  }
+  // await GTPB.refreshLines([paths]) rewrites the openings line on those kept pages (all kept pages if none given)
+  async function refreshLines(paths) {
+    var map = readMap((await settings()).headerInjectCode).map, postIds = {};
+    (await items()).forEach(function (z) { postIds[z.fullUrl] = z.id; });
+    return refresh(map, paths || Object.keys(map), {}, postIds);
+  }
+
   async function run(opts) {
     opts = opts || {};
     var copy = opts.copy || {}, dry = !!opts.dryRun;
@@ -361,23 +392,7 @@
     // 6. kept pages whose set of openings changed: openings line, and after a swap the pay line and apply link
     var postIds = {}; its.forEach(function (z) { postIds[z.fullUrl] = z.id; });
     pages.forEach(function (pg) { if (pg.path) postIds[pg.path] = pg.postId; });
-    var kp = Object.keys(touched).filter(function (p) { return map[p] && !map[p].to && postIds[p]; });
-    for (var t = 0; t < kp.length; t++) {
-      try {
-        await putPost(postIds[kp[t]], function (p) {
-          var b = p.body.layout.rows[0].columns[0].blocks[0]; if (!(b.value && b.value.html)) return false;
-          var path = kp[t], h0 = b.value.html, h = h0, sw = swaps[path];
-          var members = [map[path]].concat(Object.keys(map).filter(function (k) { return map[k].to === path; }).map(function (k) { return map[k]; }));
-          if (sw) {
-            h = h.split(encodeURIComponent('[' + sw[0] + ']')).join(encodeURIComponent('[' + sw[1] + ']'));
-            h = h.replace(PS + esc(sw[2] + ', full time.') + '</p>', function () { return PS + esc(sw[3] + ', full time.') + '</p>'; });
-          }
-          h = setLine(h, groupLine(members));
-          if (h === h0) return false;
-          b.value.html = h;
-        });
-      } catch (e) { errors.push({error: 'page update failed for ' + kp[t] + ': ' + (e.message || e)}); }
-    }
+    (await refresh(map, Object.keys(touched), swaps, postIds)).errors.forEach(function (e) { errors.push(e); });
 
     // 7. redirects: pages that came down go to the board, old pages of folded openings go to the kept page
     if (redirects.length) {
@@ -415,5 +430,5 @@
   }
 
   window.GTPB = {plan: plan, preview: preview, run: run, verify: verify, EXPL: DATA.EXPL, ROLES: Object.keys(DATA.ROLES), CONCEPTS: Object.keys(DATA.CONCEPTS),
-    makePage: makePage, template: template, place: place, analyze: analyze, groupLine: groupLine, setLine: setLine};
+    makePage: makePage, template: template, place: place, analyze: analyze, groupLine: groupLine, setLine: setLine, refreshLines: refreshLines};
 })();
