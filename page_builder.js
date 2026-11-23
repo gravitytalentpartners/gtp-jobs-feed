@@ -41,7 +41,9 @@
   function slugify(t) { return t.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
   function today() { return new Date().toISOString().slice(0, 10); }
   function dashFree(s) { return !/[‐-―]/.test(s); }
-  async function getJSON(u) { var r = await fetch(u, {credentials: 'include', cache: 'no-store'}); if (!r.ok) throw new Error(u + ' ' + r.status); return r.json(); }
+  function pause(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  // paced: a burst of admin calls can sign the Squarespace session out
+  async function getJSON(u) { await pause(250); var r = await fetch(u, {credentials: 'include', cache: 'no-store'}); if (!r.ok) throw new Error(u + ' ' + r.status); return r.json(); }
 
   function pay(comp) {
     var k = function (s) { return Math.round(parseFloat(s) * 1000); };
@@ -244,6 +246,7 @@
   async function putPost(id, change) {
     var u = POSTS + '/' + id, p = await getJSON(u);
     if (change(p) === false) return false;
+    await pause(250);
     var r = await fetch(u, {method: 'PUT', credentials: 'include', headers: hdr(), body: JSON.stringify(p)});
     if (!r.ok) throw new Error('status ' + r.status);
     return true;
