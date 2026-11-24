@@ -12,7 +12,7 @@ BASE = 'appLD7LkoIgyCC4Bp'
 TABLE = 'tbldnlIklvv8YS7h5'
 FIELDS = ['fldFXHEJG0vswcP8X', 'fld8KT77VQn86rNfP', 'fldSsFLw3ySgFAJjT', 'fld5UPa0CIqdxSghJ',
           'fld8MDuji3ZwMSvwV', 'fldvo9KXYArkefizu', 'fldvjN43yMHvMRvpa', 'fldHKVEnJt6R2cr6T',
-          'flduOBAWQWhwN06Bf', 'fldyqswm0O4UZG8NM']
+          'flduOBAWQWhwN06Bf', 'fldyqswm0O4UZG8NM', 'fldBFwi4wg27ZB0O4']
 FORMULA = "AND({Post to Website}, NOT(OR({Stage} = 'Completed Placement', {Stage} = 'On Hold')))"
 
 

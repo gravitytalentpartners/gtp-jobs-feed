@@ -20,7 +20,7 @@ F = {
     'title': 'fldFXHEJG0vswcP8X', 'pos': 'fld8KT77VQn86rNfP', 'client': 'fldSsFLw3ySgFAJjT',
     'metro': 'fld5UPa0CIqdxSghJ', 'tags': 'fld8MDuji3ZwMSvwV', 'desc': 'fldvo9KXYArkefizu',
     'comp': 'fldvjN43yMHvMRvpa', 'sal': 'fldHKVEnJt6R2cr6T', 'internal': 'flduOBAWQWhwN06Bf',
-    'stage': 'fldyqswm0O4UZG8NM',
+    'stage': 'fldyqswm0O4UZG8NM', 'paymin': 'fldBFwi4wg27ZB0O4',
 }
 CLOSED = {'completed placement', 'on hold'}
 FORM = 'https://airtable.com/appLD7LkoIgyCC4Bp/pagK5TijMmeWmwEYu/form'
@@ -82,6 +82,10 @@ def build_jobs(records, overrides, pages=None, manual=None):
         comp = norm_comp(v.get(F['comp']), sal)
         check_public(rid, role, metro, desc, tags, comp, v.get(F['title']))
         j = {'rid': rid, 'role': role, 'metro': metro, 'tags': tags, 'desc': desc, 'comp': comp, 'sal': sal}
+        # low end of the client's posted base pay; the job page uses it as the pay floor
+        pm = v.get(F.get('paymin'))
+        if isinstance(pm, (int, float)) and 0 < pm <= (sal or pm):
+            j['min'] = int(pm)
         if o.get('badge'):
             j['badge'] = o['badge']
         jobs.append(j)

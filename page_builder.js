@@ -95,7 +95,7 @@
     var pr = pay(job.comp);
     var entry = {role: job.role, metro: job.metro, tags: job.tags, comp: job.comp, ref: job.rid, date: today(),
       onet: c.onet || '11-1021.00 General and Operations Managers'};
-    if (pr) { entry.max = pr[1]; if (pr[0]) entry.min = pr[0]; } else entry.nosal = true;
+    if (pr) { entry.max = pr[1]; if (pr[0]) entry.min = pr[0]; else if (job.min && job.min <= pr[1]) entry.min = job.min; } else entry.nosal = true;
     if (p[2]) entry.city = p[2];
     if (p[3]) entry.st = p[3];
     if (/remote/i.test(job.metro)) entry.remote = true;
@@ -133,14 +133,17 @@
     var i = html.indexOf('</p>');
     return i < 0 ? html : html.slice(0, i + 4) + line + html.slice(i + 4);
   }
-  function payFields(e, comp) {
+  // realMin is the client's posted pay floor from the feed (job.min); it wins over the standard floor rule
+  function payFields(e, comp, realMin) {
     var pr = pay(comp);
-    if (pr) { e.max = pr[1]; if (pr[0]) e.min = pr[0]; else delete e.min; delete e.nosal; } else { delete e.max; delete e.min; e.nosal = true; }
+    if (pr) { e.max = pr[1]; if (pr[0]) e.min = pr[0]; else if (realMin && realMin <= pr[1]) e.min = realMin; else delete e.min; delete e.nosal; }
+    else { delete e.max; delete e.min; e.nosal = true; }
   }
+  function wantMin(j) { var pr = pay(j.comp); return pr ? (pr[0] || (j.min && j.min <= pr[1] ? j.min : undefined)) : undefined; }
   function foldedEntry(keptEntry, job, keptPath) {
     var e = JSON.parse(JSON.stringify(keptEntry));
     e.comp = job.comp; e.ref = job.rid; e.date = today(); e.to = keptPath;
-    payFields(e, job.comp);
+    payFields(e, job.comp, job.min);
     return e;
   }
 
@@ -211,7 +214,7 @@
       else if (firstNew[k]) folds.push({rid: j.rid, intoRid: firstNew[k], role: j.role, metro: j.metro});
       else { firstNew[k] = j.rid; missing.push(j); }
     });
-    var sync = feed.jobs.filter(function (j) { var p = refs[j.rid]; return p && (map[p].comp !== j.comp || map[p].metro !== j.metro); })
+    var sync = feed.jobs.filter(function (j) { var p = refs[j.rid]; return p && (map[p].comp !== j.comp || map[p].metro !== j.metro || (j.min && map[p].min !== wantMin(j))); })
       .map(function (j) { var p = refs[j.rid]; return {rid: j.rid, path: p, comp: [map[p].comp, j.comp], metro: [map[p].metro, j.metro]}; });
     return {live: live, byPath: byPath, refs: refs, missing: missing, folds: folds, stale: stale, promote: promote,
       dropFolded: dropFolded, normalize: normalize, sync: sync};
@@ -362,7 +365,7 @@
     down.forEach(function (d) { delete map[d.path]; });
     synced.forEach(function (sy) {
       var e = map[sy.path]; if (!e) return; var j = live[sy.rid];
-      e.comp = j.comp; e.metro = j.metro; payFields(e, j.comp);
+      e.comp = j.comp; e.metro = j.metro; payFields(e, j.comp, j.min);
       var pl2 = place(j.metro); if (pl2[2]) e.city = pl2[2]; else delete e.city; if (pl2[3]) e.st = pl2[3]; else delete e.st;
       touched[e.to || sy.path] = 1;
     });
@@ -374,7 +377,7 @@
     a.promote.forEach(function (pr) {
       var e = map[pr.path], fk = map[pr.from] ? pr.from : pr.path + '#' + pr.ref, f = map[fk]; if (!e || !f) return;
       swaps[pr.path] = [e.ref, f.ref, e.comp, f.comp];
-      e.ref = f.ref; e.comp = f.comp; e.date = f.date; payFields(e, f.comp);
+      e.ref = f.ref; e.comp = f.comp; e.date = f.date; payFields(e, f.comp, f.min);
       delete map[fk]; touched[pr.path] = 1; promoted.push({path: pr.path, oldRef: pr.oldRef, ref: f.ref});
     });
     a.folds.forEach(function (fo) {
